@@ -1,0 +1,432 @@
+﻿<!--
+Dubtrack Song Title Pulling for OBS's BrowserSource.
+by Netux (https://netux.ml/).
+
+Recommended settings:
+- Width: The Base (Canvas) Width (to cover all of the canvas/stream width)
+- Height: 55 or more
+- CSS: if not using any to change the color of stuff then remove the default "body { ..." stuff
+- FPS: equal to `pullInterval` (see below), or less if you don't want gifs to look clumpsy or laggy
+!-->
+
+<!--
+Settings:
+Edit to your liking,
+you can also use a query string (e.g file:///{...}/?endpoints.proxy={proxy}&roomUrl={roomUrl}&... etc)
+!-->
+<script>
+	// To modify the style of the page, use a CSS stylesheet.
+	var SETTINGS = {
+		endpoints: { // URL's from where to request stuff. Usually not need to be changed
+			proxy: '', // find a proxy yourself, the Dubtrack API doesn't allow requests
+			base: 'https://api.dubtrack.fm',
+			roomInfo: '/room/:roomurl',
+			nowPlaying: '/room/:roomid/playlist/active',
+			userInfo: '/user/:userid',
+			userAvatar: '/user/:userid/image'
+		},
+		roomURL: 'kappacave', // change this to the part of the URL after "/join/"
+		pullInterval: 5, // cooldown for checking if the song changed, in seconds
+		useRoomBackground: true, // whenever to set the room background as the page's background, accepts true or false
+		scrollingTitle: { // song title horizontal scrolling settings
+			enabled: true, // whenever to allow scroll the title
+			onlyOnOverflow: true, // whenever to scroll only when the text is larger than the space available for it
+			speed: -1 // negative values mean right to left; positive, left to right
+		}
+	}
+</script>
+
+
+<!--
+Unrecognizeable stuff to non-devs:
+No need to continue reading from now on (unless you plan on changing something).
+!-->
+<style>
+	@import url("https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700,700i");
+	
+	body {
+		position: fixed;
+		top: 0;
+		left: 0;
+		width: 100%;
+		height: 100%;
+		margin: 0;
+	}
+	body::before {
+		position: absolute;
+		content: "";
+		top: 0;
+		left: 0;
+		width: inherit;
+		height: inherit;
+	}
+	
+	@media screen and (min-height: 55px) {
+		html {
+			font-size: 27.6vh;
+		}
+		
+		body {
+			min-height: 55px;
+			color: #FFF;
+			font-family: "Open Sans", sans-serif;
+			background: no-repeat bottom;
+			background-size: cover;
+			display: flex;
+		}
+		body::before {
+			background-color: rgba(47, 47, 47, .75);
+		}
+		body::after {
+			content: "Made with 💗 by Netux";
+			position: fixed;
+			bottom: 0;
+			left: 50%;
+			font-size: .75em;
+			opacity: .08;
+			transform: translateX(-50%);
+		}
+		
+		p {
+			margin: 0;
+		}
+		
+		#dj-avatar-container {
+			height: 100%;
+		}
+		#dj-avatar-container #dj-avatar {
+			position: relative;
+			top: 50%;
+			width: auto;
+			min-width: 100vh;
+			height: 100%;
+			visibility: hidden;
+			transform: translateY(-50%);
+		}
+		#dj-avatar-container #dj-avatar[src] {
+			visibility: visible;
+		}
+		
+		#song-info {
+			position: relative;
+			width: 100%;
+			height: 100%;
+			padding: .35rem 1rem;
+			font-weight: 700;
+			box-sizing: border-box;
+			display: flex;
+		}
+		#song-info #song-info-left {
+			width: 100%;
+			margin: auto 0;
+		}
+		#song-info #song-info-left #dj-info {
+			font-size: .85em;
+			color: #878C8E;
+			line-height: 1.25;
+		}
+		#song-info #song-info-left #song-name-container {
+			position: relative;
+			white-space: nowrap;
+		}
+		#song-info #song-info-left #song-name-container #song-name {
+			position: absolute;
+			top: 0;
+			left: 0;
+			width: 100%;
+		}
+		#song-info #song-info-left #song-name-container p#song-name {
+			overflow: hidden;
+			text-overflow: ellipsis;
+		}
+		#song-info #song-time-left {
+			margin: auto 0;
+			padding-left: .5em;
+		}
+		#song-info #song-progress {
+			position: absolute;
+			bottom: 0;
+			left: 0;
+			width: 0;
+			height: 9vh;
+			background-color: #0FF;
+		}
+	}
+	
+	@media screen and (max-height: 54px) {
+		body {
+			font-family: consolas;
+			font-weight: 700;
+			color: #FFF;
+			text-align: center;
+			text-shadow: 1px 1px #000;
+			overflow: hidden;
+			display: block;
+		}
+		body::before {
+			background-color: #F00;
+			z-index: 1;
+		}
+		body::after {
+			content: "Height too small! It must be >=55 pixels";
+			position: absolute;
+			top: 50%;
+			width: 100%;
+			transform: translateY(-50%);
+			z-index: 2;
+			display: inherit;
+		}
+	}
+</style>
+
+<div id="dj-avatar-container">
+	<img id="dj-avatar" />
+</div>
+<div id="song-info">
+	<div id="song-info-left">
+		<p id="dj-info">
+			<span id="dj-name"></span>
+			<span id="info-lore"></span>
+		</p>
+		<div id="song-name-container">
+			&nbsp;
+			<p id="song-name"></p>
+		</div>
+	</div>
+	<div id="song-time-left"></div>
+	<div id="song-progress"></div>
+</div>
+
+<script>
+	if(document.location.search && document.location.search.length) {
+		var queryStringMatch = document.location.search.substr(1).match(/([^?&=]+(?:=[^?&=]+)?)/g);
+		if(queryStringMatch !== null) {
+			function modifyKey(key, val) {
+				var res = SETTINGS,
+					split = key.split('.');
+				while(split.length > 1) {
+					res = res[split[0]];
+					split.shift();
+				}
+				res = res[split[0]] = typeof val !== 'undefined' ? val : res[split[0]];
+				return res;
+			}
+			
+			queryStringMatch.forEach(function(str) {
+				var key, val, currentVal;
+				{
+					var split = str.split('=');
+					key = split[0];
+					val = split[1];
+					currentVal = modifyKey(key);
+				}
+				switch(typeof currentVal) {
+					default:
+						break;
+					case 'object':
+						if(!Array.isArray(currentVal))
+							return;
+						val = val.split(',');
+						break;
+					case 'number':
+						val = parseFloat(val);
+						break;
+					case 'boolean':
+						val = val.toLowerCase() === 'true' && val !== '0';
+						break;
+				}
+				modifyKey(key, val);
+			});
+		}
+	}
+</script>
+<script>
+	function error() {
+		var str = '';
+		for(var i = 0; i < arguments.length; i++)
+			str += (i === 0 ? '' : '\n') + arguments[i];
+		
+		document.write([
+			'<body style="',
+				'color: #FFF;',
+				'font-family: consolas;',
+				'font-weight: 700;',
+				'text-shadow: 1px 1px #000;',
+				'background-color: #F00;',
+				'white-space: pre-wrap;',
+				'display: flex;',
+			'">',
+				'<span style="margin: auto">' + str + '</span>',
+			'</body>'
+		].join(''));
+	}
+	function req(url, cb) {
+		var req = new XMLHttpRequest();
+		req.open('GET', url);
+		req.onreadystatechange = function() {
+			if(req.readyState !== 4)
+				return;
+			
+			if(req.status !== 200) 
+				return error(
+					'Something happened while getting room info',
+					'Make sure the proxy (`SETTINGS.endpoints.proxy`) is properly set.'
+				);
+			
+			var res;
+			try {
+				res = JSON.parse(req.responseText);
+			} catch(x) {
+				error('\'roomInfo\' endpoint returned invalid JSON', req.responseText);
+				return;
+			}
+			
+			cb(res);
+		};
+		req.send();
+	}
+	function parseURL(url, params) {
+		Object.keys(SETTINGS.endpoints).forEach(function(key) {
+			url = url.replace('{' + key + '}', SETTINGS.endpoints[key]);
+		});
+		Object.keys(params).forEach(function(key) {
+			url = url.replace(':' + key.toLowerCase(), params[key]);
+		});
+		return url;
+	}
+	function parseDigitalClockNumber(num) {
+		return (num > 9 ? '' : '0') + parseInt(num);
+	}
+	
+	function replaceElement(from, to) {
+		from.parentNode.replaceChild(to, from);
+		to.id = from.id;
+		to.innerHTML = from.innerHTML;
+		return to;
+	}
+	function changeSongName(str) {
+		var songNameEl = document.getElementById('song-name');
+		songNameEl.innerHTML = str;
+		songNameEl = replaceElement(songNameEl, document.createElement('p'));
+		
+		if(SETTINGS.scrollingTitle.enabled && SETTINGS.scrollingTitle.speed !== 0) {
+			var hundredPercentWidth = parseFloat(window.getComputedStyle(songNameEl).width);
+			
+			songNameEl.style.width = 'auto';
+			
+			if(!SETTINGS.scrollingTitle.onlyOnOverflow || parseFloat(window.getComputedStyle(songNameEl).width) > hundredPercentWidth) {
+				songNameEl = replaceElement(songNameEl, document.createElement('marquee'));
+				songNameEl.setAttribute('direction', SETTINGS.scrollingTitle.speed < 0 ? 'left' : 'right');
+				songNameEl.setAttribute('scrollamount', 6 * Math.abs(SETTINGS.scrollingTitle.speed));
+			}
+		}
+	}
+	
+	var roomName = '',
+		currentSong = { },
+		progressUpdateInterval = null;
+	
+	function progressUpdate() {
+		{
+			var percentage;
+			if(currentSong !== null) {
+				currentSong.time++;
+				if(currentSong.time < currentSong.duration)
+					percentage = 100 * currentSong.time / currentSong.duration;
+				else percentage = 100;
+			} else percentage = 0;
+			
+			document.getElementById('song-progress').style.width = percentage + '%';
+		}
+		
+		{
+			var timeLeft;
+			if(currentSong !== null) {
+				if(currentSong.time <= currentSong.duration) {
+					timeLeft = currentSong.duration - currentSong.time;
+					var timeLeftSecs = timeLeft % 60,
+						timeLeftMins = timeLeft / 60 % 60,
+						timeLeftHrs = timeLeft / 60 / 60 % 60;
+						
+					timeLeft = [ timeLeftMins, timeLeftSecs ];
+					if(timeLeftHrs >= 1)
+						timeLeft.unshift(timeLeftHrs);
+					timeLeft = timeLeft.map(function(num) { return parseDigitalClockNumber(num); }).join(':');
+				} else timeLeft = (currentSong.duration / 60 / 60 % 60 > 1 ? '00:' : '') + '00:00';
+			} else timeLeft = '';
+			
+			document.getElementById('song-time-left').innerText = timeLeft;
+		}
+	}
+	function pullSongDataAndUpdateDOMLoop(roomID) {
+		function onDone() {
+			if(currentSong !== null) {
+				clearInterval(progressUpdateInterval);
+				progressUpdateInterval = setInterval(progressUpdate, 1000);
+			}
+			progressUpdate();
+			setTimeout(pullSongDataAndUpdateDOMLoop.bind(undefined, roomID), SETTINGS.pullInterval * 1000);
+		}
+		
+		req(parseURL('{proxy}{base}{nowPlaying}', { roomID: roomID }), function(songRes) {
+			var djAvatarEl = document.getElementById('dj-avatar'),
+				djNameEl = document.getElementById('dj-name'),
+				infoLoreEl = document.getElementById('info-lore');
+			
+			switch(songRes.code) {
+				default:
+					return error('The Dubtrack API returned an unknown error.');
+				case 404:
+					currentSong = null;
+					djAvatarEl.removeAttribute('src');
+					djNameEl.innerText = '';
+					infoLoreEl.innerText = 'No song is playing';
+					changeSongName('Waiting for songs from ' + roomName);
+					
+					onDone();
+					break;
+				case 200:
+					var newSong = {
+						djID: songRes.data.song.userid,
+						songID: songRes.data.song.songid,
+						time: songRes.data.startTime,
+						duration: songRes.data.songInfo.songLength
+					};
+					if(songRes.data.songInfo.type === 'youtube')
+						newSong.duration = parseInt(newSong.duration / 1000);
+					if(currentSong !== null)
+						if(currentSong.djID === newSong.djID && currentSong.songID === newSong.songID) {
+							onDone();
+							break;
+						}
+						
+					currentSong = newSong;
+					
+					req(parseURL('{proxy}{base}{userInfo}', { userID: currentSong.djID }), function(userRes) {
+						djAvatarEl.src = parseURL('{base}{userAvatar}', { userID: currentSong.djID });
+						djNameEl.innerText = userRes.data.username;
+						infoLoreEl.innerText = 'is playing';
+						changeSongName(songRes.data.songInfo.name);
+						
+						onDone();
+					});
+					break;
+			}
+		});
+	}
+	
+	if(window.innerHeight >= 55) {
+		changeSongName('Fetching...');
+		req(parseURL('{proxy}{base}{roomInfo}', { roomURL: SETTINGS.roomURL }), function(res) {
+			if(res.code === 404)
+				return error('Room with URL \'' + SETTINGS.roomURL + '\' not found.');
+			
+			roomName = res.data.name;
+			
+			if(SETTINGS.useRoomBackground)
+				document.body.style.backgroundImage = 'url("' + res.data.background.secure_url + '")';
+				
+			pullSongDataAndUpdateDOMLoop(res.data._id);
+		});
+	} else changeSongName('Refresh the BrowserSource');
+</script>
